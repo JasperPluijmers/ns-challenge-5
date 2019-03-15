@@ -2,6 +2,7 @@ package my_protocol;
 
 import framework.*;
 
+import javax.xml.crypto.Data;
 import java.util.*;
 
 /**
@@ -26,6 +27,7 @@ public class RoutingProtocol implements IRoutingProtocol {
     private static final int N_ROUTERS = 6;
     private static int myAddress;
     private static final int BOUND_INFINITY = 100000;
+    private Set<Integer> lastNeighbours = new HashSet<>();
 
     @Override
     public void init(LinkLayer linkLayer) {
@@ -46,7 +48,7 @@ public class RoutingProtocol implements IRoutingProtocol {
         //loop over all destinations
         for (int destination = 1; destination < N_ROUTERS + 1; destination++) {
             //initial values
-            int lowestCost = myRoutingTable.containsKey(destination) ? myRoutingTable.get(destination).cost : BOUND_INFINITY;
+            int lowestCost = BOUND_INFINITY;
             int nextHop = 0;
             boolean ischanged = false;
 
@@ -60,15 +62,9 @@ public class RoutingProtocol implements IRoutingProtocol {
                 //lookup the cost from the neighbour to the destination, then calculate our cost to it
                 int costFromNeighbour = neighboursTable.get(neighbour - 1, destination - 1);
                 int costFromMe = costFromNeighbour + neighboursTable.get(myAddress - 1, neighbour - 1);
+
                 //0 is never a real cost
-                if (costFromNeighbour != 0) {
-                    //If we don't have a route to the destination we should always use a route
-                    if (!myRoutingTable.containsKey(destination)) {
-                        lowestCost = costFromMe;
-                        nextHop = neighbour;
-                        myRoutingTable.put(destination, new Route(nextHop, lowestCost));
-                        ischanged = true;
-                    }
+                if (neighbour == destination || costFromNeighbour != 0) {
                     //Otherwise check if we found a better route
                     if (costFromMe < lowestCost) {
                         lowestCost = costFromMe;
@@ -82,7 +78,6 @@ public class RoutingProtocol implements IRoutingProtocol {
                 myRoutingTable.put(destination, new Route(nextHop, lowestCost));
                 neighboursTable.set(myAddress - 1, destination - 1, lowestCost);
             }
-
         }
     }
 
@@ -90,7 +85,7 @@ public class RoutingProtocol implements IRoutingProtocol {
     @Override
     public void tick(PacketWithLinkCost[] packetsWithLinkCosts) {
         // Get the address of this node
-
+        myRoutingTable.clear();
         System.out.println("tick; received " + packetsWithLinkCosts.length + " packets");
 
         Set<Integer> currentNeighbours = new HashSet<>();
@@ -101,24 +96,58 @@ public class RoutingProtocol implements IRoutingProtocol {
             Packet packet = packetWithLinkCost.getPacket();
             int neighbour = packet.getSourceAddress();             // from whom is the packet?
             int linkcost = packetWithLinkCost.getLinkCost();  // what's the link cost from/to this neighbour?
-
-            updateTable(packet, neighbour);
             currentNeighbours.add(neighbour);
 
-            if (!myRoutingTable.containsKey(neighbour)) {
+            if (!packet.isRaw()) {
+                updateTable(packet, neighbour);
                 myRoutingTable.put(neighbour, new Route(neighbour, linkcost));
                 neighboursTable.set(myAddress - 1, neighbour - 1, linkcost);
             }
         }
+
+        lastNeighbours.removeAll(currentNeighbours);
+
+        if (lastNeighbours.size() > 0) {
+            lastNeighbours.forEach(neighbour -> {
+                myRoutingTable.remove(neighbour);
+                neighboursTable.set(myAddress - 1, neighbour - 1, BOUND_INFINITY);
+            });
+        }
+
+
         updateRoutes(currentNeighbours);
 
-        Packet initialBroadcast = new Packet(this.linkLayer.getOwnAddress(), 0, neighboursTable);
+        lastNeighbours = currentNeighbours;
+        sendPoisonpackages(currentNeighbours);
+        Packet initialBroadcast = new Packet(myAddress, 0, new byte[2]);
         linkLayer.transmit(initialBroadcast);
     }
 
-    private void printTable() {
+    private void sendPoisonpackages(Set<Integer> neighbours) {
+        //only have to send messages to your neighbours
+        for (int neighbour: neighbours) {
+            //Make a copytable
+            DataTable poisonTable = new DataTable(N_ROUTERS);
+            poisonTable.set(N_ROUTERS - 1, N_ROUTERS - 1, 0);
+            //copy the relevant row from our table
+            Integer[] poisonDistances = neighboursTable.getRow(myAddress - 1);
+            for (int destination = 1; destination < N_ROUTERS + 1; destination++) {
+                //If we go through the node we give ininity back
+                if (myRoutingTable.containsKey(destination) && myRoutingTable.get(destination).nextHop == neighbour) {
+                    poisonDistances[destination - 1] = BOUND_INFINITY;
+                }
+            }
+            //set the corrected row into the to be sent table
+            poisonTable.setRow(myAddress - 1, poisonDistances);
+            System.out.println("poisontable to " + neighbour + ":");
+            printTable(poisonTable);
+            linkLayer.transmit(new Packet(myAddress, neighbour, poisonTable));
+        }
+    }
+
+    private void printTable(DataTable datatable) {
         for (int destination = 1; destination < N_ROUTERS + 1; destination++) {
-            System.out.println(Arrays.toString(neighboursTable.getRow(destination - 1)));
+            System.out.println(Arrays.toString(datatable.getRow(destination - 1)));
         }
     }
 
